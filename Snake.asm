@@ -58,9 +58,22 @@
 	missile_icon_ver equ '|'
 	missile_color equ 0Eh
 
+	;missile warning
+	missile_state_warning equ 3h
+	warning_frames equ 54d		;3.5s
+	warning_icon equ '!'
+	warning_color equ 8Ch		;bright red and blinking, 0Ch for steady
+
 	;explosion design 
-	explosion_icon equ 4Eh     ;await for explosion to be fired
+	explosion_icon equ '*'     ;await for explosion to be fired
 	explosion_color equ 0Fh 
+
+	;explosion marker
+	missile_target dw ?
+	target_icon equ 'X'
+	target_color equ 0Ch		;bright red
+	missile_max_steps_hor equ 77d	;col 1 to col 78
+	missile_max_steps_ver equ 22d	;row 1 to row 23
 
 
 
@@ -135,16 +148,20 @@ MAIN_LOOP:
 		jz   MOVE_MISSILE
 
 		cmp  byte ptr [missile_state], 2
-		jnz  END_UPDATE_MISSILE ;if not true, skips to jump
-		jmp  HANDLE_EXPLOSION 
+		jnz  CHECK_STATE_3
+		jmp  HANDLE_EXPLOSION
+
+CHECK_STATE_3:
+		cmp  byte ptr [missile_state], missile_state_warning
+		jnz  END_UPDATE_MISSILE
+		jmp  HANDLE_WARNING
 
 SPAWN_MISSILE_CHANCE:
-		;random chance to spawn a missile
-		call GENERATE_RANDOM_MISSILE_DIRECTION ;checks the direction of the missile
-		call GENERATE_RANDOM_MISSILE_LOCATION ;then sets the location dependent on the direction
-
-		mov  byte ptr [missile_state], 1h
-		jmp  END_UPDATE_MISSILE
+		in   al, 40h              ; fast-changing hardware counter
+		and  al, 0Fh 			  ;change to 07h for frequent missile spawns, 1fh for rarer spawns
+		jnz  END_UPDATE_MISSILE   ; only spawns about 1 frame in 16
+		call GENERATE_RANDOM_MISSILE_DIRECTION
+		call GENERATE_RANDOM_MISSILE_LOCATION
 
 		;creates a random fuse
 		push ax
@@ -152,25 +169,32 @@ SPAWN_MISSILE_CHANCE:
 		push dx
 
 		mov  ah, 0h
-		int  1Ah ;gets system timer
-		mov  ax, dx	
+		int  1Ah
+		mov  ax, dx
 
 		xor  dx, dx
-		mov  cx, 50d ;random fuse between 0-50 frames
+		mov  cx, 50d
 		div  cx
 
-		add  dx, 10d ;fuse length is atleast 10 frames
-		mov  byte ptr [missile_fuse], dl 
+		add  dx, 10d                          ; fuse is 10..59 frames
+		mov  byte ptr [missile_fuse], dl      ; save it
 
-		pop  dx 
+		pop  dx
 		pop  cx
 		pop  ax
+
+		call CALC_MISSILE_TARGET	;calculates where the 'x' should be placed on the screen, based on the missile direction and location
+
+		; start the warning instead of launching
+		mov  byte ptr [missile_state], missile_state_warning
+		mov  byte ptr [missile_timer], warning_frames
 		ret  
 
 END_UPDATE_MISSILE:
 		ret  
 
 MOVE_MISSILE:
+		call DRAW_TARGET_MARK
 		;erase old missile location
 		mov  bx, [missile_location]
 		mov  al, ' '
@@ -235,7 +259,8 @@ DRAW_MISSILE:
 
 TRIGGER_EXPLOSION:
 		mov  byte ptr [missile_state], 2h
-		mov  byte ptr [missile_timer], 10d ;lasts 10 frames
+		;explosion 
+		mov  byte ptr [missile_timer], 10d ;lasts 10 frames, 65ms x 10frames = 0.65 secs
 		call DRAW_EXPLOSION
 		ret  
 
@@ -244,48 +269,60 @@ HANDLE_EXPLOSION:
 		jnz  END_HANDLE_EXPLOSION
 		;once timer hits zero, clear the explosion and reset missile state
 		call CLEAR_EXPLOSION
+		;prints player score after missile explosion if it is hit
+		call PRINT_PLAYER_SCORE
+		mov  si, [food_location]
+		mov  al, food_icon
+		mov  ah, food_color
+		mov  es:[si], ax
 		mov  byte ptr [missile_state], 0h
 END_HANDLE_EXPLOSION:
 		ret  
+
+HANDLE_WARNING:
+		call DRAW_TARGET_MARK
+		mov  bx, [missile_location]
+		dec  byte ptr [missile_timer]
+		jz   LAUNCH_MISSILE
+
+		; flash the "!" on and off
+		mov  al, warning_icon
+		test byte ptr [missile_timer], 8h
+		jnz  DRAW_WARNING_CELL
+		mov  al, ' '
+DRAW_WARNING_CELL:
+		mov  ah, warning_color
+		mov  es:[bx], ax
+		ret  
+
+LAUNCH_MISSILE:
+		mov  al, ' '                      ; erase the "!"
+		mov  ah, background_color
+		mov  es:[bx], ax
+		mov  byte ptr [missile_state], 1h
+		ret  
 	UPDATE_MISSILE endp
 
-	;draws and erase 3x3 grid, just a helper
-	DRAW_3X3_GRID proc near
-		;draws a 3x3 grid centered at the missile location
-		push BX
-		push cx
-
+	;draws and erase plus grid, just a helper
+	DRAW_PLUS_GRID proc near
+		push bx
 		mov  bx, [missile_location]
 
-		;for simplicity,  9 cells are drawn manually
-		;center
-		mov  es:[bx], ax
-		; Left / Right
-		mov  es:[bx - 2], ax
-		mov  es:[bx + 2], ax
+		mov  es:[bx], ax            ; center
+		mov  es:[bx - 2], ax        ; left
+		mov  es:[bx + 2], ax        ; right
+		mov  es:[bx - 160d], ax     ; up
+		mov  es:[bx + 160d], ax     ; down
 
-		; Top row
-		sub  bx, 160d
-		mov  es:[bx - 2], ax
-		mov  es:[bx], ax
-		mov  es:[bx + 2], ax
-
-		; Bottom row
-		add  bx, 320d  ; Go down two rows from top
-		mov  es:[bx - 2], ax
-		mov  es:[bx], ax
-		mov  es:[bx + 2], ax
-
-		pop  cx
 		pop  bx
 		ret  
-	DRAW_3X3_GRID endp
+	DRAW_PLUS_GRID endp
 
 	DRAW_EXPLOSION proc near
 		;draws the explosion at the missile location
 		mov  al, explosion_icon
 		mov  ah, explosion_color
-		call DRAW_3X3_GRID
+		call DRAW_PLUS_GRID
 		ret  
 	DRAW_EXPLOSION endp
 
@@ -293,7 +330,7 @@ END_HANDLE_EXPLOSION:
 		;clears the explosion at the missile location
 		mov  al, ' '
 		mov  ah, background_color
-		call DRAW_3X3_GRID
+		call DRAW_PLUS_GRID
 		ret  
 	CLEAR_EXPLOSION endp
 
@@ -316,47 +353,28 @@ CHECK_FLIGHT_COLLISION:
 		jmp  END_MISSILE_COLLISION
 
 CHECK_BLAST_COLLISION:
-		;check if snake hits the explosion area (3x3 grid)
 		mov  bx, [missile_location]
-		; Check center row
-		cmp  ax, bx
+		cmp  ax, bx                 ; center
 		jz   MISSILE_DEATH
-		mov  cx, bx
-		sub  cx, 2
-		cmp  ax, cx
+		add  bx, 2
+		cmp  ax, bx                 ; right
 		jz   MISSILE_DEATH
-		add  cx, 4
-		cmp  ax, cx
+		sub  bx, 4
+		cmp  ax, bx                 ; left
 		jz   MISSILE_DEATH
-
-		; Check top row
-		sub  bx, 160d
-		cmp  ax, bx
+		add  bx, 2                  ; back to center
+		add  bx, 160d
+		cmp  ax, bx                 ; down
 		jz   MISSILE_DEATH
-		mov  cx, bx
-		sub  cx, 2
-		cmp  ax, cx
-		jz   MISSILE_DEATH
-		add  cx, 4
-		cmp  ax, cx
-		jz   MISSILE_DEATH
-
-		; Check bottom row
-		add  bx, 320d
-		cmp  ax, bx
-		jz   MISSILE_DEATH
-		mov  cx, bx
-		sub  cx, 2
-		cmp  ax, cx
-		jz   MISSILE_DEATH
-		add  cx, 4
-		cmp  ax, cx
+		sub  bx, 320d
+		cmp  ax, bx                 ; up
 		jz   MISSILE_DEATH
 END_MISSILE_COLLISION:
 		ret  
 
 MISSILE_DEATH:
 		call GAME_OVER
+		ret  
 	CHECK_MISSILE_COLLISION endp
 
 	GENERATE_RANDOM_MISSILE_LOCATION proc near
@@ -462,6 +480,70 @@ END_GEN_DIR:
 		ret  
 	GENERATE_RANDOM_MISSILE_DIRECTION endp
 
+	;calculates where the 'x' should be placed on the screen, based on the missile direction and location
+	;formula: target = location + step * min(fuse - 1, max steps for this direction)
+	CALC_MISSILE_TARGET proc near
+		push ax
+		push bx
+		push cx
+		push dx
+
+		mov  al, [missile_fuse]
+		xor  ah, ah
+		dec  ax
+		mov  cx, ax                        ; cx = steps allowed by the fuse
+
+		cmp  byte ptr [missile_direction], RIGHT
+		jz   TARGET_RIGHT
+		cmp  byte ptr [missile_direction], LEFT
+		jz   TARGET_LEFT
+		cmp  byte ptr [missile_direction], UP
+		jz   TARGET_UP
+
+TARGET_DOWN:
+		mov  bx, missile_max_steps_ver
+		mov  dx, screen_width * 2d
+		jmp  TARGET_CLAMP
+TARGET_UP:
+		mov  bx, missile_max_steps_ver
+		mov  dx, -(screen_width * 2d)
+		jmp  TARGET_CLAMP
+TARGET_LEFT:
+		mov  bx, missile_max_steps_hor
+		mov  dx, -2d
+		jmp  TARGET_CLAMP
+TARGET_RIGHT:
+		mov  bx, missile_max_steps_hor
+		mov  dx, 2d
+
+TARGET_CLAMP:
+		cmp  cx, bx
+		jbe  TARGET_STEPS_OK
+		mov  cx, bx                        ; the screen edge stops it before the fuse
+TARGET_STEPS_OK:
+		mov  ax, cx
+		imul dx                            ; ax = steps * step size (low word is enough)
+		add  ax, [missile_location]
+		mov  [missile_target], ax
+
+		pop  dx
+		pop  cx
+		pop  bx
+		pop  ax
+		ret  
+	CALC_MISSILE_TARGET endp
+
+	DRAW_TARGET_MARK proc near
+		push ax
+		push bx
+		mov  bx, [missile_target]
+		mov  al, target_icon
+		mov  ah, target_color
+		mov  es:[bx], ax
+		pop  bx
+		pop  ax
+		ret  
+	DRAW_TARGET_MARK endp
 
 	INIT_GAME proc near
 		mov  byte ptr [player_score], 0h
@@ -471,7 +553,7 @@ END_GEN_DIR:
 		mov  byte ptr [EXIT], 0h
 		mov  byte ptr [START_AGAIN], 0h
 		mov  byte ptr [missile_state], 0h ;resets missile state so that it wont carry over to the next game
-
+		mov  byte ptr [missile_timer], 0h ;sets missile timer
 		call INIT_SCREEN
 		call INIT_SNAKE_BODY
 
