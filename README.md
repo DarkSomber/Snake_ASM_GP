@@ -1,7 +1,7 @@
 ﻿# Snake (x86 Assembly) — Feature Guide
 
 A 16-bit x86 assembly Snake game (`.model small`, 80x25 text mode, drawn straight into video memory at `B800h`).
-Source file: `Snake_missile_fruits.asm`
+Source file: `Snake.asm`
 
 Eat the red `*` food to grow and score. The game speeds up as your score climbs, and you win at a score of 255.
 This document covers the features added on top of the basic game.
