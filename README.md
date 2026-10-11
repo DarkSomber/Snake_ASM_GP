@@ -29,9 +29,9 @@ This document covers the features added on top of the basic game.
 | Thing | Look | What it does |
 |---|---|---|
 | Food | red `*` | +1 length, +1 score |
-| Immunity fruit | cyan `#` | Temporary invincibility (see below) |
+| Immunity fruit | cyan `I` | Temporary invincibility (see below) |
 | Shortening fruit | yellow `S` | Cuts the snake shorter |
-| Rocks | gray `^` | Kill the snake on contact |
+| Rocks | gray `R` | Kill the snake on contact |
 | Missiles | `!`, `X`, `-` / `|`, `*` | Random hazards (see below) |
 
 ### Immunity fruit (`I`)
