@@ -21,7 +21,7 @@
 	; score label is printed at the bottom-right corner of the screen
 	player_score_label_offset equ (screen_height * screen_width - 1d) * 2d
 	player_score db ?
-	player_win_score equ 0FFh    ; score needed to win original is 0FFh: 255
+	player_win_score equ 0FFh    ; score needed to win
 
 	; ---- snake ----
 	; snake_body holds cell offsets into the video buffer, head first
