@@ -21,7 +21,7 @@
 	; score label is printed at the bottom-right corner of the screen
 	player_score_label_offset equ (screen_height * screen_width - 1d) * 2d
 	player_score db ?
-	player_win_score equ 0FFh    ; score needed to win
+	player_win_score equ 0FFh    ; score needed to win original is 0FFh: 255
 
 	; ---- snake ----
 	; snake_body holds cell offsets into the video buffer, head first
@@ -64,7 +64,7 @@
 	shrink_food_icon  equ 'S'
 	shrink_food_color equ 0Eh            ; yellow
 
-	; --- OBSTACLES ----
+	; ---- OBSTACLES ----
 
 	; ---- rocks ----
 	num_rocks equ 10d
@@ -77,34 +77,34 @@
 	start_lane_begin equ 3d * screen_width * 2d
 	start_lane_end   equ 4d * screen_width * 2d
 
-	; --- missles and explosion----
-	missile_state db 0      ;await for missile to be fired
-	missile_location dw ?   
-	missile_direction db ?  ;either LEFT RIGHT UP DOWN
-	missile_timer db 0      ;time before missile explodes
-	missile_fuse db 0	  ;frames before missile explodes
+	; ---- missiles and explosions ----
+	missile_state db 0       ; 0 = none, 1 = in flight, 2 = exploding, 3 = warning
+	missile_location dw ?
+	missile_direction db ?   ; LEFT, RIGHT, UP or DOWN
+	missile_timer db 0       ; frames left in the warning or explosion phase
+	missile_fuse db 0        ; frames of flight before the missile explodes
 
-	;missile design 
+	; missile design
 	missile_icon_hor equ '-'
 	missile_icon_ver equ '|'
 	missile_color equ 0Eh
 
-	;missile warning
+	; missile warning
 	missile_state_warning equ 3h
-	warning_frames equ 54d		;3.5s
+	warning_frames equ 54d       ; ~3.5 seconds
 	warning_icon equ '!'
-	warning_color equ 8Ch		;bright red and blinking, 0Ch for steady
+	warning_color equ 8Ch        ; bright red and blinking (0Ch for steady)
 
-	;explosion design 
-	explosion_icon equ '*'     ;await for explosion to be fired
-	explosion_color equ 0Fh 
+	; explosion design
+	explosion_icon equ '*'
+	explosion_color equ 0Fh
 
-	;explosion marker
+	; explosion marker
 	missile_target dw ?
 	target_icon equ 'X'
-	target_color equ 0Ch		;bright red
-	missile_max_steps_hor equ 77d	;col 1 to col 78
-	missile_max_steps_ver equ 22d	;row 1 to row 23
+	target_color equ 0Ch         ; bright red
+	missile_max_steps_hor equ 77d    ; col 1 to col 78
+	missile_max_steps_ver equ 22d    ; row 1 to row 23
 
 
 
@@ -119,8 +119,8 @@
 	; ---- leaderboard ----
 	; the last max_scores runs are kept in the order they were played (when it
 	; is full the oldest run is dropped); they are sorted by score, highest
-	; first, only when they are drawn. it is only shown on the game over
-	; screen and while paused.
+	; first, only when they are drawn. it is only shown on the end screen
+	; (death or win) and while paused.
 	max_scores   equ 5d
 	name_len_max equ 5d
 	lb_count  db 0h
@@ -157,6 +157,8 @@
 	name_slots_origin equ row_slots + (panel_col + (panel_w - 15d) / 2d) * 2d
 
 	txt_game_over   db 'GAME OVER', 0
+	txt_you_win     db 'YOU WIN!', 0
+	end_title       dw ?                   ; title string END_SCREEN shows
 	txt_enter_name  db 'ENTER YOUR NAME', 0
 	txt_hint1       db 'UP/DOWN: CHANGE LETTER', 0
 	txt_hint2       db 'LEFT/RIGHT: MOVE', 0
@@ -169,11 +171,10 @@
 	lb_row_buf      db '1. XXXXX  000', 0
 
 	; ---- TEMP DESIGN: copy/messages ----
-	msg_game_win   db 'YOU WIN! PRESS ANY KEY TO EXIT', 0Ah, 0Dh, '$'
 	msg_start_game db 'WELCOME TO SNAKE. ESC: QUIT   P: PAUSE', 0Ah, 0Dh, '$'
 
-	; lookup table used to convert the score byte into two ASCII digits
-	; (hex nibble -> ASCII char, low nibble table then high nibble table)
+	; lookup table for the score label: ascii[score] is the high digit and
+	; ascii[score + 256] is the low digit (hex digits, 0-F)
 	ascii db 16 dup ('0')
 	db     16 dup ('1')
 	db     16 dup ('2')
@@ -205,13 +206,13 @@ MAIN_LOOP:
 
 	call   UPDATE_MISSILE
 	call   CHECK_MISSILE_COLLISION
-	cmp    byte ptr [EXIT], 1h          ; died (or won): stop this frame here so
+	cmp    byte ptr [EXIT], 1h          ; died: stop this frame here
 	jnz JFIX_SKIP_1
 	jmp  MAIN_LOOP_FINISHED
 JFIX_SKIP_1:
 
 	call   CHECK_SNAKE_AET_FOOD
-	cmp    byte ptr [EXIT], 1h
+	cmp    byte ptr [EXIT], 1h          ; died or won
 	jnz JFIX_SKIP_2
 	jmp  MAIN_LOOP_FINISHED
 JFIX_SKIP_2:
@@ -246,7 +247,7 @@ JFIX_SKIP_4:
 	mov    ah, 4ch
 	int    21h
 
-	;missile state: 0 = no missile, 1 = missile in flight, 2 = explosion in progress
+	; missile state: 0 = no missile, 1 = in flight, 2 = explosion, 3 = warning
 	UPDATE_MISSILE proc near
 		cmp  byte ptr [missile_state], 0
 		jz   SPAWN_MISSILE_CHANCE
@@ -269,14 +270,14 @@ JFIX_SKIP_6:
 
 SPAWN_MISSILE_CHANCE:
 		in   al, 40h              ; fast-changing hardware counter
-		and  al, 0Fh 			  ;change to 07h for frequent missile spawns, 1fh for rarer spawns
+		and  al, 0Fh              ; 07h = more frequent spawns, 1Fh = rarer
 		jz JFIX_SKIP_7
 		jmp  END_UPDATE_MISSILE
 JFIX_SKIP_7:
 		call GENERATE_RANDOM_MISSILE_DIRECTION
 		call GENERATE_RANDOM_MISSILE_LOCATION
 
-		;creates a random fuse
+		; random fuse
 		push ax
 		push cx
 		push dx
@@ -290,25 +291,25 @@ JFIX_SKIP_7:
 		div  cx
 
 		add  dx, 10d                          ; fuse is 10..59 frames
-		mov  byte ptr [missile_fuse], dl      ; save it
+		mov  byte ptr [missile_fuse], dl
 
 		pop  dx
 		pop  cx
 		pop  ax
 
-		call CALC_MISSILE_TARGET	;calculates where the 'x' should be placed on the screen, based on the missile direction and location
+		call CALC_MISSILE_TARGET
 
 		; start the warning instead of launching
 		mov  byte ptr [missile_state], missile_state_warning
 		mov  byte ptr [missile_timer], warning_frames
-		ret  
+		ret
 
 END_UPDATE_MISSILE:
-		ret  
+		ret
 
 MOVE_MISSILE:
 		call DRAW_TARGET_MARK
-		;erase old missile location
+		; erase old missile location
 		mov  bx, [missile_location]
 		mov  al, ' '
 		mov  ah, background_color
@@ -318,7 +319,6 @@ MOVE_MISSILE:
 		jnz JFIX_SKIP_8
 		jmp  TRIGGER_EXPLOSION
 JFIX_SKIP_8:
-		;missile direction
 		cmp  byte ptr [missile_direction], RIGHT
 		jz   MOVE_MISSILE_RIGHT
 		cmp  byte ptr [missile_direction], LEFT
@@ -333,11 +333,11 @@ JFIX_SKIP_10:
 		jnz JFIX_SKIP_11
 		jmp  MOVE_MISSILE_DOWN
 JFIX_SKIP_11:
-		ret  
+		ret
 
 MOVE_MISSILE_RIGHT:
 		mov  ax, [missile_location]
-		xor  dx, dx                       ; not cwd
+		xor  dx, dx
 		mov  bx, screen_width * 2d
 		div  bx                           ; dx = column offset in bytes
 		cmp  dx, (screen_width - 2d) * 2d ; column 78 or beyond
@@ -373,28 +373,26 @@ MOVE_MISSILE_DOWN:
 		jae  TRIGGER_EXPLOSION
 		add  word ptr [missile_location], screen_width * 2d
 		mov  al, missile_icon_ver
-		; falls into DRAW_MISSILE
 
 DRAW_MISSILE:
 		; al = icon
 		mov  bx, [missile_location]
 		mov  ah, missile_color
 		mov  es:[bx], ax
-		ret  
+		ret
 
 TRIGGER_EXPLOSION:
 		mov  byte ptr [missile_state], 2h
-		;explosion 
-		mov  byte ptr [missile_timer], 10d ;lasts 10 frames, 65ms x 10frames = 0.65 secs
+		mov  byte ptr [missile_timer], 10d    ; 10 frames, ~0.65 seconds
 		call DRAW_EXPLOSION
-		ret  
+		ret
 
 HANDLE_EXPLOSION:
 		dec  byte ptr [missile_timer]
 		jnz  END_HANDLE_EXPLOSION
-		;once timer hits zero, clear the explosion and reset missile state
+		; timer hit zero: clear the explosion and reset the missile
 		call CLEAR_EXPLOSION
-		;prints player score after missile explosion if it is hit
+		; the blast may have erased the score label and the food
 		call PRINT_PLAYER_SCORE
 		mov  si, [food_location]
 		mov  al, food_icon
@@ -402,7 +400,7 @@ HANDLE_EXPLOSION:
 		mov  es:[si], ax
 		mov  byte ptr [missile_state], 0h
 END_HANDLE_EXPLOSION:
-		ret  
+		ret
 
 HANDLE_WARNING:
 		call DRAW_TARGET_MARK
@@ -418,17 +416,18 @@ HANDLE_WARNING:
 DRAW_WARNING_CELL:
 		mov  ah, warning_color
 		mov  es:[bx], ax
-		ret  
+		ret
 
 LAUNCH_MISSILE:
 		mov  al, ' '                      ; erase the "!"
 		mov  ah, background_color
 		mov  es:[bx], ax
 		mov  byte ptr [missile_state], 1h
-		ret  
+		ret
 	UPDATE_MISSILE endp
 
-	;draws and erase plus grid, just a helper
+	; in: ax = character and attribute. draws it in a plus shape around the
+	; missile location (used to both draw and erase the explosion)
 	DRAW_PLUS_GRID proc near
 		push bx
 		mov  bx, [missile_location]
@@ -440,23 +439,21 @@ LAUNCH_MISSILE:
 		mov  es:[bx + 160d], ax     ; down
 
 		pop  bx
-		ret  
+		ret
 	DRAW_PLUS_GRID endp
 
 	DRAW_EXPLOSION proc near
-		;draws the explosion at the missile location
 		mov  al, explosion_icon
 		mov  ah, explosion_color
 		call DRAW_PLUS_GRID
-		ret  
+		ret
 	DRAW_EXPLOSION endp
 
 	CLEAR_EXPLOSION proc near
-		;clears the explosion at the missile location
 		mov  al, ' '
 		mov  ah, background_color
 		call DRAW_PLUS_GRID
-		ret  
+		ret
 	CLEAR_EXPLOSION endp
 
 	CHECK_MISSILE_COLLISION proc near
@@ -471,14 +468,14 @@ JFIX_SKIP_14:
 		jmp  END_MISSILE_COLLISION
 JFIX_SKIP_15:
 
-		mov  ax, snake_body[0h] ;checks for the snake's head
+		mov  ax, snake_body[0h]             ; the snake's head
 
 		cmp  byte ptr [missile_state], 1h
 		jz   CHECK_FLIGHT_COLLISION
 
 		cmp  byte ptr [missile_state], 2h
 		jz   CHECK_BLAST_COLLISION
-		ret  
+		ret
 
 CHECK_FLIGHT_COLLISION:
 		cmp  ax, [missile_location]
@@ -507,11 +504,11 @@ JFIX_SKIP_17:
 		cmp  ax, bx                 ; up
 		jz   MISSILE_DEATH
 END_MISSILE_COLLISION:
-		ret  
+		ret
 
 MISSILE_DEATH:
 		call GAME_OVER
-		ret  
+		ret
 	CHECK_MISSILE_COLLISION endp
 
 	GENERATE_RANDOM_MISSILE_LOCATION proc near
@@ -586,14 +583,14 @@ SPAWN_STORE:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
-	GENERATE_RANDOM_MISSILE_LOCATION endp 
+		ret
+	GENERATE_RANDOM_MISSILE_LOCATION endp
 
 	GENERATE_RANDOM_MISSILE_DIRECTION proc near
 		push ax
 		push dx
 		mov  ah, 0h
-		int  1Ah ;gets system timer
+		int  1Ah                       ; system timer ticks
 		mov  ax, dx
 		and  ax, 03h
 
@@ -618,11 +615,11 @@ SET_DIR_RIGHT:
 END_GEN_DIR:
 		pop  dx
 		pop  ax
-		ret  
+		ret
 	GENERATE_RANDOM_MISSILE_DIRECTION endp
 
-	;calculates where the 'x' should be placed on the screen, based on the missile direction and location
-	;formula: target = location + step * min(fuse - 1, max steps for this direction)
+	; works out where the 'X' target mark goes, from the missile direction and location
+	; formula: target = location + step * min(fuse - 1, max steps for this direction)
 	CALC_MISSILE_TARGET proc near
 		push ax
 		push bx
@@ -673,7 +670,7 @@ TARGET_STEPS_OK:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	CALC_MISSILE_TARGET endp
 
 	DRAW_TARGET_MARK proc near
@@ -685,7 +682,7 @@ TARGET_STEPS_OK:
 		mov  es:[bx], ax
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	DRAW_TARGET_MARK endp
 
 	INIT_GAME proc near
@@ -695,8 +692,8 @@ TARGET_STEPS_OK:
 		mov  word ptr [food_location], 8d * screen_width * 2d + 10d * 2d
 		mov  byte ptr [EXIT], 0h
 		mov  byte ptr [START_AGAIN], 0h
-		mov  byte ptr [missile_state], 0h ;resets missile state so that it wont carry over to the next game
-		mov  byte ptr [missile_timer], 0h ;sets missile timer
+		mov  byte ptr [missile_state], 0h   ; so a missile doesn't carry over to the next game
+		mov  byte ptr [missile_timer], 0h
 
 		; fruit state is reset too, so nothing carries over after a restart
 		mov  byte ptr [immunity_active], 0h
@@ -717,7 +714,7 @@ TARGET_STEPS_OK:
 		call GENERATE_RANDOM_ROCKS
 		call DRAW_ROCKS
 
-		ret  
+		ret
 	INIT_GAME endp
 
 	; game over if the head's position matches any body cell
@@ -746,10 +743,10 @@ CHECK_SNAKE_NOOSE_GAME_OVER:
 END_CHECK_SNAKE_NOOSE:
 		pop  ax
 		pop  si
-		ret  
+		ret
 	CHECK_SNAKE_NOOSE endp
 
-	; only checks the south edge for now; east/west are handled by wraparound math
+	; only checks the south edge; east/west are handled by wraparound math
 	CHECK_SNAKE_IN_BORDERS proc near
 		push ax
 		mov  ax, snake_body[0h]
@@ -760,7 +757,7 @@ END_CHECK_SNAKE_NOOSE:
 
 CHECK_SNAKE_IN_BORDERS_VALID:
 		pop  ax
-		ret  
+		ret
 	CHECK_SNAKE_IN_BORDERS endp
 
 	CHECK_SNAKE_AET_FOOD proc near
@@ -794,7 +791,7 @@ JFIX_SKIP_21:
 END_CHECK_SNAKE_AET_FOOD:
 		pop  si
 		pop  ax
-		ret  
+		ret
 	CHECK_SNAKE_AET_FOOD endp
 
 	; ======================= IMMUNITY FRUIT =======================
@@ -813,7 +810,7 @@ END_CHECK_SNAKE_AET_FOOD:
 
 END_CHECK_IMMUNITY_FOOD:
 		pop  ax
-		ret  
+		ret
 	CHECK_SNAKE_AET_IMMUNITY_FOOD endp
 
 	; counts the immunity down; when it runs out a new fruit appears
@@ -826,11 +823,11 @@ END_CHECK_IMMUNITY_FOOD:
 		call GENERATE_RANDOM_IMMUNITY_LOCATION
 		call DRAW_IMMUNITY_FOOD
 END_UPDATE_IMMUNITY:
-		ret  
+		ret
 	UPDATE_IMMUNITY endp
 
 	; picks a random cell for the immunity fruit
-	; (not on the snake, the red food or the shortening fruit)
+	; (not on the snake, the red food, the shortening fruit or a rock)
 	GENERATE_RANDOM_IMMUNITY_LOCATION proc near
 		push ax
 		push cx
@@ -878,7 +875,7 @@ JFIX_SKIP_24:
 		pop  dx
 		pop  cx
 		pop  ax
-		ret  
+		ret
 	GENERATE_RANDOM_IMMUNITY_LOCATION endp
 
 	DRAW_IMMUNITY_FOOD proc near
@@ -890,7 +887,7 @@ JFIX_SKIP_24:
 		mov  es:[si], ax
 		pop  si
 		pop  ax
-		ret  
+		ret
 	DRAW_IMMUNITY_FOOD endp
 
 	; ======================= SHORTENING FRUIT =======================
@@ -946,7 +943,7 @@ GENERATE_RANDOM_SHRINK_RANDOM:
 		mov  cx, (screen_width * screen_height) - (food_bounders / 2d)
 
 GENERATE_RANDOM_SHRINK_TRY:
-		; never share a cell with the red food or the immunity fruit
+		; never share a cell with the red food, the immunity fruit or a rock
 		cmp  bx, [food_location]
 		jnz JFIX_SKIP_25
 		jmp  GENERATE_RANDOM_SHRINK_NEXT
@@ -1244,7 +1241,7 @@ REDRAW_SKIP_SHRINK:
 		call DRAW_ROCKS
 		pop  si
 		pop  ax
-		ret  
+		ret
 	REDRAW_PICKUPS endp
 
 	GENERATE_RANDOM_FOOD_LOCATION proc near
@@ -1266,7 +1263,7 @@ GENERATE_RANDOM_FOOD_LOCATION_AGAIN:
 		; force to an even offset (video cells are 2 bytes each)
 		and  dx, 0FFFEh
 		add  dx, food_bounders / 2d
-		; retry if it lands on either fruit
+		; retry if it lands on either fruit or a rock
 		cmp  dx, [immunity_food_location]
 		jz   GENERATE_RANDOM_FOOD_LOCATION_AGAIN
 		cmp  dx, [shrink_food_location]
@@ -1295,7 +1292,7 @@ JFIX_SKIP_36:
 		pop  si
 		pop  dx
 		pop  ax
-		ret  
+		ret
 	GENERATE_RANDOM_FOOD_LOCATION endp
 
 	; speeds the game up as the score climbs
@@ -1317,38 +1314,16 @@ JFIX_SKIP_36:
 		sub  dx, bx
 		int  15h
 
-		; pop order mirrors the push order above (ax,cx,dx,bx pushed,
-		; so bx,dx,cx,ax popped) to keep the stack balanced
 		pop  bx
 		pop  dx
 		pop  cx
 		pop  ax
-		ret  
+		ret
 	MAIN_LOOP_FRAME_RATE endp
 
-	WIN_GAME proc near
-		push dx
-		push ax
-
-		mov  dx, offset msg_game_win
-		mov  ah, 9h
-		int  21h
-		; wait for a keypress
-		mov  ax, 0h
-		mov  ah, 0h
-		int  16h
-		; clear key buffer
-		mov  ah, 0Ch
-		int  21h
-
-		mov  byte ptr [EXIT], 1h
-
-		pop  ax
-		pop  dx
-		ret  
-	WIN_GAME endp
-
-	GAME_OVER proc near
+	; shared end screen for death and win: name entry, then leaderboard,
+	; then SPACE (play again) or ESC (exit). the title comes from [end_title].
+	END_SCREEN proc near
 		push ax
 		push bx
 		push cx
@@ -1358,9 +1333,9 @@ JFIX_SKIP_36:
 
 		; several checks can fire in the same frame; only the first one counts
 		cmp  byte ptr [EXIT], 1h
-		jnz  GAME_OVER_FIRST
-		jmp  END_GAME_OVER
-GAME_OVER_FIRST:
+		jnz  END_SCREEN_FIRST
+		jmp  END_END_SCREEN
+END_SCREEN_FIRST:
 		mov  byte ptr [EXIT], 1h
 
 		; ---- step 1: ask for the player's name ----
@@ -1368,7 +1343,7 @@ GAME_OVER_FIRST:
 
 		mov  ah, panel_title_color
 		mov  dx, row_title
-		mov  si, offset txt_game_over
+		mov  si, [end_title]
 		call PRINT_CENTERED
 
 		mov  al, [player_score]
@@ -1393,9 +1368,9 @@ GAME_OVER_FIRST:
 		call PRINT_CENTERED
 
 		call ENTER_NAME
-		jc   GAME_OVER_SKIP_SAVE           ; esc: show the board without saving
+		jc   END_SCREEN_SKIP_SAVE          ; esc: show the board without saving
 		call ADD_SCORE
-GAME_OVER_SKIP_SAVE:
+END_SCREEN_SKIP_SAVE:
 
 		; ---- step 2: leaderboard ----
 		call DRAW_PANEL
@@ -1411,22 +1386,22 @@ GAME_OVER_SKIP_SAVE:
 
 		mov  ax, 0C00h                     ; flush stray keys
 		int  21h
-GAME_OVER_GET_KEY:
+END_SCREEN_GET_KEY:
 		mov  ah, 0h
 		int  16h
 
 		cmp  ah, END_GAME_KEY
-		jz   END_GAME_OVER
+		jz   END_END_SCREEN
 
 		cmp  ah, START_AGAIN_KEY
-		jz   GAME_OVER_START_AGAIN
+		jz   END_SCREEN_START_AGAIN
 
-		jmp  GAME_OVER_GET_KEY
+		jmp  END_SCREEN_GET_KEY
 
-GAME_OVER_START_AGAIN:
+END_SCREEN_START_AGAIN:
 		mov  [START_AGAIN], 1h
 
-END_GAME_OVER:
+END_END_SCREEN:
 		mov  ax, 0C00h
 		int  21h
 
@@ -1436,8 +1411,22 @@ END_GAME_OVER:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
+	END_SCREEN endp
+
+	; death: every existing "call GAME_OVER" keeps working
+	GAME_OVER proc near
+		mov  word ptr [end_title], offset txt_game_over
+		call END_SCREEN
+		ret
 	GAME_OVER endp
+
+	; win: same name entry and leaderboard, different title
+	WIN_GAME proc near
+		mov  word ptr [end_title], offset txt_you_win
+		call END_SCREEN
+		ret
+	WIN_GAME endp
 
 	; ======================= LEADERBOARD / PAUSE =======================
 
@@ -1480,7 +1469,7 @@ PAUSE_RESUME:
 		pop  si
 		pop  dx
 		pop  ax
-		ret  
+		ret
 	PAUSE_GAME endp
 
 	; lets the player type a name: up/down change the letter (blank, A-Z),
@@ -1604,7 +1593,7 @@ EN_END:
 		pop  si
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	ENTER_NAME endp
 
 	; draws "[A][ ][ ][ ][ ]" with the selected letter highlighted
@@ -1646,7 +1635,7 @@ JFIX_SKIP_44:
 		pop  si
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	DRAW_NAME_SLOTS endp
 
 	; stores the finished run (name_buf + player_score). when the board is
@@ -1705,7 +1694,7 @@ AS_COPY_NAME:
 		pop  si
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	ADD_SCORE endp
 
 	; fills lb_order with the slot numbers sorted by score, highest first
@@ -1774,7 +1763,7 @@ SORT_DONE:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	SORT_LEADERBOARD endp
 
 	; draws the 5 leaderboard lines ("1. NAME   123"); free slots show dashes
@@ -1861,7 +1850,7 @@ JFIX_SKIP_50:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	DRAW_LEADERBOARD_ROWS endp
 
 	; in: al = 0..255, di -> 3 bytes of text to fill with decimal digits
@@ -1891,7 +1880,7 @@ JFIX_SKIP_50:
 		pop  di
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	BYTE_TO_DEC3 endp
 
 	; prints a 0-terminated string centred inside the panel
@@ -1941,7 +1930,7 @@ PC_DONE:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	PRINT_CENTERED endp
 
 	; clears the panel area and draws its border
@@ -1999,7 +1988,7 @@ JFIX_SKIP_52:
 		pop  si
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	DRAW_PANEL endp
 
 	; remembers what is on screen under the panel (used while paused)
@@ -2032,7 +2021,7 @@ SAVE_PANEL_COL:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	SAVE_PANEL endp
 
 	; puts back the cells SAVE_PANEL remembered
@@ -2065,7 +2054,7 @@ RESTORE_PANEL_COL:
 		pop  cx
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	RESTORE_PANEL endp
 
 	MOVE_SNAKE proc near
@@ -2105,7 +2094,7 @@ MOVE_TO_DIRECTION:
 
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	MOVE_SNAKE endp
 
 	PRINT_SNAKE proc near
@@ -2190,10 +2179,11 @@ END_PRINT_SNAKE:
 		pop  bx
 		pop  si
 		pop  ax
-		ret  
+		ret
 	PRINT_SNAKE endp
 
-	; renders the score as "SCORE:XX" using the ascii lookup table
+	; draws the score label at the bottom-right corner. the label text is
+	; written right to left, so the stores below run backwards.
 	PRINT_PLAYER_SCORE proc near
 		push ax
 		push bx
@@ -2201,10 +2191,10 @@ END_PRINT_SNAKE:
 
 		mov  bx, 0h
 		mov  bl, [player_score]
-		; low nibble digit
+		; low digit
 		mov  al, ascii[bx + 256d]
 		mov  es:[player_score_label_offset], ax
-		; high nibble digit
+		; high digit
 		mov  al, ascii[bx]
 		mov  es:[player_score_label_offset - 2d], ax
 
@@ -2228,7 +2218,7 @@ END_PRINT_SNAKE:
 
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	PRINT_PLAYER_SCORE endp
 
 	INIT_SCREEN proc near
@@ -2260,7 +2250,7 @@ END_PRINT_SNAKE:
 		pop  si
 		pop  cx
 		pop  ax
-		ret  
+		ret
 	INIT_SCREEN endp
 
 	WRITE_SCREEN_BACKGROUND proc near
@@ -2277,7 +2267,7 @@ INIT_BACKGROUND_LOOP:
 
 		pop  ax
 		pop  si
-		ret  
+		ret
 	WRITE_SCREEN_BACKGROUND endp
 
 	INIT_SCREEN_BACK_TO_OS proc near
@@ -2291,7 +2281,7 @@ INIT_BACKGROUND_LOOP:
 
 		pop  cx
 		pop  ax
-		ret  
+		ret
 	INIT_SCREEN_BACK_TO_OS endp
 
 	; starting body: 4 cells in a row, head pointing right
@@ -2305,8 +2295,9 @@ INIT_BACKGROUND_LOOP:
 		ret
 	INIT_SNAKE_BODY endp
 
-	; reads a key if one is waiting and updates snake_direction.
-	; esc sets EXIT; if no key was pressed, direction is left unchanged.
+	; reads a key if one is waiting: esc sets EXIT, P pauses, and an arrow
+	; key that is not a reversal updates snake_direction. with no key
+	; pressed the direction is left unchanged.
 	GET_DIRECTION_BY_KEY proc near
 		push ax
 		push bx
@@ -2326,8 +2317,8 @@ JFIX_SKIP_54:
 		jmp  GET_DIRECTION_BY_KEY_PAUSE
 JFIX_SKIP_55:
 
-		; a move is only valid if it's not a direct reversal;
-		; |new - old| == 3 or 5 identifies the perpendicular/forward moves
+		; only perpendicular turns are accepted: the scan codes of two
+		; perpendicular arrows differ by 3 or 5, a reversal differs by 2 or 8
 		mov  bh, ah
 		mov  bl, [snake_direction]
 		sub  bh, bl
@@ -2344,7 +2335,7 @@ JFIX_SKIP_57:
 		jz   GET_DIRECTION_BY_KEY_VALID_MOVE
 		cmp  bh, 5d
 		jz   GET_DIRECTION_BY_KEY_VALID_MOVE
-		; invalid move, ignore it
+		; reversal or unrelated key: ignore it
 		mov  ah, 0Ch
 		int  21h
 		jmp  END_GET_DIRECTION_BY_KEY
@@ -2369,7 +2360,7 @@ GET_DIRECTION_BY_KEY_EXIT_GAME_IS_ON:
 END_GET_DIRECTION_BY_KEY:
 		pop  bx
 		pop  ax
-		ret  
+		ret
 	GET_DIRECTION_BY_KEY endp
 
 	; shifts every cell one slot toward the tail, freeing slot 0 for the new head
@@ -2390,7 +2381,7 @@ L1:
 		pop  si
 		pop  ax
 		pop  bx
-		ret  
+		ret
 	SHR_ARRAY endp
 
 	end MAIN
